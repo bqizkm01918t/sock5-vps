@@ -1,12 +1,13 @@
 #!/bin/bash
 
 #================================================================================
-# SOCKS5 Proxy Auto-Installer Script (v3)
+# SOCKS5 Proxy Auto-Installer Script (v4)
 #
 # Description: This script automates the installation and configuration of a
 #              SOCKS5 proxy server using 'gost', a lightweight tunnel program.
 # Features:
 #   - Option to auto-assign a random port or manually specify one.
+#   - Robust download with file type verification to prevent installation errors.
 #   - Automatically generates a secure username and password.
 #   - Sets up the proxy as a systemd service for background running and auto-restart.
 #   - Creates a powerful 's5' command to start/stop/restart/status/info/update.
@@ -39,6 +40,7 @@ check_root() {
     [ "$(id -u)" -ne 0 ] && print_error "错误：此脚本必须以 root 权限运行。"
 }
 
+# ... (get_port 和 generate_credentials 函数与v3版本相同，此处为简洁省略)
 get_port() {
     print_info "请选择端口分配方式:"
     echo "1) 自动分配一个随机端口 (推荐)"
@@ -84,9 +86,10 @@ generate_credentials() {
     print_success "凭证已生成。"
 }
 
-# This function now also sets the global ARCH variable
+
+# This function now has robust download and verification
 install_gost() {
-    print_info "正在检测系统架构并下载最新版 gost..."
+    print_info "正在检测系统架构并准备下载..."
     local arch_raw=$(uname -m)
     case $arch_raw in
         x86_64) ARCH="amd64" ;;
@@ -98,19 +101,36 @@ install_gost() {
     [ -z "$LATEST_VERSION" ] && print_error "无法获取 gost 最新版本号，请检查网络或 GitHub API 限制。"
     
     DOWNLOAD_URL="https://github.com/ginuerzh/gost/releases/download/v${LATEST_VERSION}/gost-linux-${ARCH}-${LATEST_VERSION}.gz"
+    TEMP_GZ="/tmp/gost.gz"
     
     print_info "正在从 $DOWNLOAD_URL 下载..."
     
-    if curl -L -o gost.gz "$DOWNLOAD_URL"; then
-        gunzip gost.gz
-        mv gost "$GOST_INSTALL_PATH"
-        chmod +x "$GOST_INSTALL_PATH"
-        print_success "gost v${LATEST_VERSION} 已成功安装到 $GOST_INSTALL_PATH"
-    else
-        print_error "下载 gost 失败，请检查您的网络连接。"
+    # Download the file
+    if ! curl -L -o "$TEMP_GZ" "$DOWNLOAD_URL"; then
+        print_error "下载 gost 失败，curl 命令执行错误。"
     fi
+    
+    # Verify the downloaded file is a valid gzip archive
+    if ! file "$TEMP_GZ" | grep -q 'gzip compressed data'; then
+        print_error "下载的文件不是有效的 Gzip 压缩包。请检查您的网络或重试。"
+        rm -f "$TEMP_GZ"
+        exit 1
+    fi
+
+    # Extract and install
+    gunzip -c "$TEMP_GZ" > "$GOST_INSTALL_PATH"
+    chmod +x "$GOST_INSTALL_PATH"
+    rm -f "$TEMP_GZ" # Clean up
+
+    # Final check
+    if [ ! -f "$GOST_INSTALL_PATH" ]; then
+        print_error "gost 文件解压或移动失败。"
+    fi
+
+    print_success "gost v${LATEST_VERSION} 已成功安装到 $GOST_INSTALL_PATH"
 }
 
+# ... (create_service, configure_firewall, setup_s5_command 函数与v3版本相同)
 create_service() {
     print_info "正在创建 systemd 服务..."
     
@@ -158,7 +178,6 @@ configure_firewall() {
     fi
 }
 
-# The ARCH variable from install_gost is now used here
 setup_s5_command() {
     PUBLIC_IP=$(curl -s ip.sb)
     [ -z "$PUBLIC_IP" ] && PUBLIC_IP="<无法自动获取, 请手动查询>"
@@ -175,7 +194,6 @@ setup_s5_command() {
 "
     echo -e "$INFO_CONTENT" > "$INFO_FILE"
 
-    # Create the 's5' management script with update functionality
     cat > "$CMD_FILE" <<EOF
 #!/bin/bash
 GREEN='\\033[0;32m'
@@ -185,7 +203,7 @@ NC='\\033[0m'
 
 SERVICE_NAME="${SERVICE_NAME}"
 GOST_INSTALL_PATH="${GOST_INSTALL_PATH}"
-ARCH="${ARCH}" # The architecture is now saved inside the command
+ARCH="${ARCH}" 
 
 show_usage() {
     echo "SOCKS5 代理服务管理工具"
@@ -205,17 +223,15 @@ show_usage() {
 
 update_gost() {
     echo -e "\${YELLOW}正在检查更新... \${NC}"
-    CURRENT_VERSION=\$(${GOST_INSTALL_PATH} -V | awk '{print \$2}' | cut -c 2-)
-    if [ -z "\$CURRENT_VERSION" ]; then
-        echo -e "\${RED}无法获取当前版本号，请检查 gost 是否安装正确。\${NC}"
+    if [ ! -f "\${GOST_INSTALL_PATH}" ]; then
+        echo -e "\${RED}错误: gost 程序未找到于 \${GOST_INSTALL_PATH}\${NC}"
         return 1
     fi
+    CURRENT_VERSION=\$(${GOST_INSTALL_PATH} -V | awk '{print \$2}' | cut -c 2-)
+    [ -z "\$CURRENT_VERSION" ] && { echo -e "\${RED}无法获取当前版本号。\${NC}"; return 1; }
     
     LATEST_VERSION=\$(curl -s "https://api.github.com/repos/ginuerzh/gost/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\\1/' | cut -c 2-)
-    if [ -z "\$LATEST_VERSION" ]; then
-        echo -e "\${RED}无法获取最新版本号，请检查网络或 GitHub API 限制。\${NC}"
-        return 1
-    fi
+    [ -z "\$LATEST_VERSION" ] && { echo -e "\${RED}无法获取最新版本号。\${NC}"; return 1; }
 
     echo "当前版本: \$CURRENT_VERSION"
     echo "最新版本: \$LATEST_VERSION"
@@ -227,27 +243,22 @@ update_gost() {
 
     echo -e "\${YELLOW}发现新版本，开始更新...\${NC}"
     DOWNLOAD_URL="https://github.com/ginuerzh/gost/releases/download/v\${LATEST_VERSION}/gost-linux-\${ARCH}-\${LATEST_VERSION}.gz"
-
+    TEMP_GZ="/tmp/gost_update.gz"
+    
     echo "正在下载: \$DOWNLOAD_URL"
-    TEMP_FILE="/tmp/gost.gz"
-    if ! curl -L -o "\$TEMP_FILE" "\$DOWNLOAD_URL"; then
-        echo -e "\${RED}下载失败，请重试。\${NC}"
-        return 1
+    if ! curl -L -o "\$TEMP_GZ" "\$DOWNLOAD_URL"; then
+        echo -e "\${RED}下载失败，请重试。\${NC}"; rm -f "\$TEMP_GZ"; return 1;
     fi
 
-    echo "正在停止服务..."
-    systemctl stop \$SERVICE_NAME
+    if ! file "\$TEMP_GZ" | grep -q 'gzip compressed data'; then
+        echo -e "\${RED}下载的文件无效，更新已取消。\${NC}"; rm -f "\$TEMP_GZ"; return 1;
+    fi
 
-    echo "正在替换旧文件..."
-    gunzip -c "\$TEMP_FILE" > "\$GOST_INSTALL_PATH"
-    chmod +x "\$GOST_INSTALL_PATH"
-    rm "\$TEMP_FILE"
-
-    echo "正在启动服务..."
-    systemctl start \$SERVICE_NAME
+    echo "正在停止服务..."; systemctl stop \$SERVICE_NAME
+    echo "正在替换旧文件..."; gunzip -c "\$TEMP_GZ" > "\$GOST_INSTALL_PATH"; chmod +x "\$GOST_INSTALL_PATH"; rm -f "\$TEMP_GZ"
+    echo "正在启动服务..."; systemctl start \$SERVICE_NAME
     
-    sleep 2 # Wait a moment for service to start
-    
+    sleep 2
     if systemctl is-active --quiet "\$SERVICE_NAME"; then
        NEW_VERSION=\$(${GOST_INSTALL_PATH} -V | awk '{print \$2}' | cut -c 2-)
        echo -e "\${GREEN}更新成功！当前版本: \$NEW_VERSION\${NC}"
@@ -275,9 +286,14 @@ EOF
     print_info "新增功能: 使用 's5 update' 来一键更新代理程序。"
 }
 
+
 # --- Main Execution ---
 main() {
     check_root
+    # Cleanup previous failed attempts first
+    systemctl stop ${SERVICE_NAME} >/dev/null 2>&1
+    rm -f /tmp/gost.gz
+    
     get_port
     generate_credentials
     install_gost
